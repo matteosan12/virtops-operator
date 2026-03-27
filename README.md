@@ -16,12 +16,6 @@ Currently implemented rotations:
 - **Linux**: SSH **public key rotation** (updates `~/.ssh/authorized_keys`).
 - **Windows**: **local password rotation** via WinRM (NTLM over port `5985`).
 
-SSH supports:
-
-- `spec.rotation.source: generate` (generate a new keypair)
-- `spec.rotation.source: provided` (install a provided public key)
-- `spec.rotation.authorizedKeysMode: replace|append` (default: `replace`)
-
 ## How to install
 
 This release is meant to be installed with **Kustomize**.
