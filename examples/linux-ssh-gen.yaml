@@ -1,0 +1,26 @@
+apiVersion: guestops.io/v1alpha1
+kind: AdminCredentialRotationPolicy
+metadata:
+  name: linux-ssh-gen
+  namespace: virt-ops
+spec:
+  targets:
+    selector:
+      matchLabels:
+        role: linux-admin
+  os: linux
+  method:
+    type: ssh
+    user: root
+    port: 22
+    auth:
+      bootstrapSecretRef: bootstrap-ssh
+  rotation:
+    kind: ssh-key
+    source: generate
+    authorizedKeysMode: replace
+  schedule: "0 */12 * * *"
+  concurrency:
+    maxConcurrent: 3
+  trigger:
+    enableAnnotation: true

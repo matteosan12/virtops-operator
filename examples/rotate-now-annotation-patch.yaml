@@ -1,0 +1,7 @@
+apiVersion: guestops.io/v1alpha1
+kind: AdminCredentialRotationPolicy
+metadata:
+  name: linux-ssh-gen
+  namespace: virt-ops
+  annotations:
+    guestops.io/rotate-now: "now"

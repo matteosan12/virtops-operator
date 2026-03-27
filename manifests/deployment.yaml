@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: virtops-operator
+  namespace: virt-ops
+  labels:
+    app: virtops-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: virtops-operator
+  template:
+    metadata:
+      labels:
+        app: virtops-operator
+    spec:
+      serviceAccountName: virtops-operator
+      containers:
+        - name: manager
+          image: docker.io/matteosantucci/virtops-operator:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /manager
+          args:
+            - --leader-elect
+          env:
+            - name: SSH_EXECUTOR_IMAGE
+              value: "docker.io/matteosantucci/virtops-ssh-executor:latest"
+            - name: WINRM_EXECUTOR_IMAGE
+              value: "docker.io/matteosantucci/virtops-winrm-executor:latest"
+          ports:
+            - containerPort: 8080
+              name: metrics
+            - containerPort: 8081
+              name: healthz
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+      securityContext: {}
