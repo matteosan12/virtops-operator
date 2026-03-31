@@ -95,9 +95,7 @@ spec:
                       enum: ["replace", "append"]
                     source:
                       type: string
-                      enum: ["generate", "provided", "external"]
-                    providedSecretRef:
-                      type: string
+                      enum: ["generate", "external"]
                     externalSecretRef:
                       type: string
                     length:
