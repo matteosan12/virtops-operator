@@ -108,8 +108,21 @@ spec:
 | `spec.rotation.providedSecretRef` | string | Secret holding the provided public key (only when `source=provided`). | Required when `source=provided` | Implemented (SSH only) |
 | `spec.rotation.externalSecretRef` | string | External Secret reference used when `source=external`. | Free-form string | Roadmap |
 | `spec.rotation.authorizedKeysMode` | string | SSH authorized_keys update strategy. | `replace` (default) \| `append` | Implemented (SSH only) |
-| `spec.rotation.length` | int | Length of generated password. | Default: executor uses `24` (min enforced by executor). | Implemented (WinRM only) |
+| `spec.rotation.length` | int | Length of generated password (legacy). | Used only when `spec.rotation.passwordPolicy` is not set. Default: executor uses `24`. | Implemented (WinRM only) |
+| `spec.rotation.passwordPolicy` | object | Password generation policy (WinRM). | See fields below. | Implemented (WinRM only) |
+| `spec.rotation.passwordPolicy.length` | int | Exact password length. | `>= 8` | Implemented (WinRM only) |
+| `spec.rotation.passwordPolicy.minLength` | int | Minimum password length (range mode). | `>= 8` | Implemented (WinRM only) |
+| `spec.rotation.passwordPolicy.maxLength` | int | Maximum password length (range mode). | `>= 8` | Implemented (WinRM only) |
+| `spec.rotation.passwordPolicy.minUpper` | int | Minimum uppercase characters. | `>= 0` | Implemented (WinRM only) |
+| `spec.rotation.passwordPolicy.minLower` | int | Minimum lowercase characters. | `>= 0` | Implemented (WinRM only) |
+| `spec.rotation.passwordPolicy.minDigits` | int | Minimum digits (includes `0`). | `>= 0` | Implemented (WinRM only) |
+| `spec.rotation.passwordPolicy.minSpecial` | int | Minimum special characters (safe charset). | `>= 0` | Implemented (WinRM only) |
 | `spec.rotation.overlapSeconds` | int | Coexistence window for old/new credentials. | `>= 0` | Roadmap |
+
+Password policy precedence:
+
+- **`passwordPolicy.length`** overrides `passwordPolicy.minLength/maxLength`.
+- If `passwordPolicy` is set but no length/range is provided, `spec.rotation.length` is used if present, otherwise the default is `24`.
 
 ### Publish (`spec.publish`)
 
