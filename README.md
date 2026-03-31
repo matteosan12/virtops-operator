@@ -14,6 +14,7 @@ It works by:
 Currently implemented rotations:
 
 - **Linux**: SSH **public key rotation** (updates `~/.ssh/authorized_keys`).
+- **Linux**: SSH **password rotation** (updates the local account password).
 - **Windows**: **local password rotation** via WinRM (NTLM over port `5985`).
 
 ## How to install
@@ -103,20 +104,19 @@ spec:
 
 | Field | Type | Description | Allowed values / default | Status |
 | --- | --- | --- | --- | --- |
-| `spec.rotation.kind` | string | What is rotated. | `ssh-key` \| `windows-password` ( `linux-password` is not supported yet) | Partially implemented |
-| `spec.rotation.source` | string | Where the new credential comes from. | `generate` \| `provided` (SSH only) \| `external` (roadmap). WinRM: `generate` only. | Partially implemented |
-| `spec.rotation.providedSecretRef` | string | Secret holding the provided public key (only when `source=provided`). | Required when `source=provided` | Implemented (SSH only) |
+| `spec.rotation.kind` | string | What is rotated. | `ssh-key` \| `windows-password` \| `linux-password` | Implemented |
+| `spec.rotation.source` | string | Where the new credential comes from. | `generate` \| `external` (roadmap). | Implemented (`generate` only) |
 | `spec.rotation.externalSecretRef` | string | External Secret reference used when `source=external`. | Free-form string | Roadmap |
 | `spec.rotation.authorizedKeysMode` | string | SSH authorized_keys update strategy. | `replace` (default) \| `append` | Implemented (SSH only) |
-| `spec.rotation.length` | int | Length of generated password (legacy). | Used only when `spec.rotation.passwordPolicy` is not set. Default: executor uses `24`. | Implemented (WinRM only) |
-| `spec.rotation.passwordPolicy` | object | Password generation policy (WinRM). | See fields below. | Implemented (WinRM only) |
-| `spec.rotation.passwordPolicy.length` | int | Exact password length. | `>= 8` | Implemented (WinRM only) |
-| `spec.rotation.passwordPolicy.minLength` | int | Minimum password length (range mode). | `>= 8` | Implemented (WinRM only) |
-| `spec.rotation.passwordPolicy.maxLength` | int | Maximum password length (range mode). | `>= 8` | Implemented (WinRM only) |
-| `spec.rotation.passwordPolicy.minUpper` | int | Minimum uppercase characters. | `>= 0` | Implemented (WinRM only) |
-| `spec.rotation.passwordPolicy.minLower` | int | Minimum lowercase characters. | `>= 0` | Implemented (WinRM only) |
-| `spec.rotation.passwordPolicy.minDigits` | int | Minimum digits (includes `0`). | `>= 0` | Implemented (WinRM only) |
-| `spec.rotation.passwordPolicy.minSpecial` | int | Minimum special characters (safe charset). | `>= 0` | Implemented (WinRM only) |
+| `spec.rotation.length` | int | Length of generated password (legacy). | Used only when `spec.rotation.passwordPolicy` is not set. Default: executor uses `24`. | Implemented (WinRM + SSH linux-password) |
+| `spec.rotation.passwordPolicy` | object | Password generation policy. | See fields below. | Implemented (WinRM + SSH linux-password) |
+| `spec.rotation.passwordPolicy.length` | int | Exact password length. | `>= 8` | Implemented (WinRM + SSH linux-password) |
+| `spec.rotation.passwordPolicy.minLength` | int | Minimum password length (range mode). | `>= 8` | Implemented (WinRM + SSH linux-password) |
+| `spec.rotation.passwordPolicy.maxLength` | int | Maximum password length (range mode). | `>= 8` | Implemented (WinRM + SSH linux-password) |
+| `spec.rotation.passwordPolicy.minUpper` | int | Minimum uppercase characters. | `>= 0` | Implemented (WinRM + SSH linux-password) |
+| `spec.rotation.passwordPolicy.minLower` | int | Minimum lowercase characters. | `>= 0` | Implemented (WinRM + SSH linux-password) |
+| `spec.rotation.passwordPolicy.minDigits` | int | Minimum digits (includes `0`). | `>= 0` | Implemented (WinRM + SSH linux-password) |
+| `spec.rotation.passwordPolicy.minSpecial` | int | Minimum special characters (safe charset). | `>= 0` | Implemented (WinRM + SSH linux-password) |
 | `spec.rotation.overlapSeconds` | int | Coexistence window for old/new credentials. | `>= 0` | Roadmap |
 
 Password policy precedence:
@@ -140,13 +140,12 @@ Password policy precedence:
 | `spec.safety.pauseOnError` | bool | Pause further rotations after failures. | `true` \| `false` | Roadmap |
 | `spec.safety.maxFailures` | int | Max failures before circuit-break. | `>= 0` | Roadmap |
 
-### Secrets reference (bootstrap and provided)
+### Secrets reference (bootstrap)
 
 | Secret purpose | Referenced by | Required keys (stringData) | Notes |
 | --- | --- | --- | --- |
-| SSH bootstrap credentials | `spec.method.auth.bootstrapSecretRef` | `privateKey` (recommended) or `password`; `username` (recommended) | Files mounted as `/bootstrap/username`, `/bootstrap/password`, `/bootstrap/privateKey`. |
+| SSH bootstrap credentials | `spec.method.auth.bootstrapSecretRef` | `username` (recommended); `privateKey` (recommended for `rotation.kind=ssh-key`); `password` (**required** for `rotation.kind=linux-password`) | Files mounted as `/bootstrap/username`, `/bootstrap/password`, `/bootstrap/privateKey`. |
 | WinRM bootstrap credentials | `spec.method.auth.bootstrapSecretRef` | `password` (required); `username` (recommended) | Files mounted as `/bootstrap/username`, `/bootstrap/password`. |
-| Provided SSH public key | `spec.rotation.providedSecretRef` | `publicKey` (required) | File mounted as `/provided/publicKey`. |
 
 ## How to use
 
@@ -158,16 +157,16 @@ Linux (SSH bootstrap):
 kubectl apply -f examples/secrets/bootstrap-ssh.yaml
 ```
 
+Linux (SSH bootstrap for `rotation.kind=linux-password`):
+
+```bash
+kubectl apply -f examples/secrets/bootstrap-ssh-password.yaml
+```
+
 Windows (WinRM bootstrap):
 
 ```bash
 kubectl apply -f examples/secrets/bootstrap-win.yaml
-```
-
-For `source: provided` (SSH public key):
-
-```bash
-kubectl apply -f examples/secrets/provided-publickey.yaml
 ```
 
 ### 2) Create a policy
@@ -178,10 +177,10 @@ Linux SSH key rotation (generated keypair, `authorized_keys` replace):
 kubectl apply -f examples/linux-ssh-gen.yaml
 ```
 
-Linux SSH key rotation (install provided public key, append mode):
+Linux password rotation (generated password):
 
 ```bash
-kubectl apply -f examples/linux-ssh-provided.yaml
+kubectl apply -f examples/linux-password-gen.yaml
 ```
 
 Windows password rotation (generated password):
@@ -217,6 +216,7 @@ The executor prints a final JSON line to stdout. You can read the logs from the 
 - Linux SSH executor outputs:
   - `newPublicKey`
   - `newPrivateKeyB64` (only when `source: generate`)
+  - `newPasswordB64` (only when `rotation.kind=linux-password`)
 
 - Windows WinRM executor outputs:
   - `newPasswordB64`
