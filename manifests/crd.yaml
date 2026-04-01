@@ -95,14 +95,36 @@ spec:
                       enum: ["replace", "append"]
                     source:
                       type: string
-                      enum: ["generate", "provided", "external"]
-                    providedSecretRef:
-                      type: string
+                      enum: ["generate", "external"]
                     externalSecretRef:
                       type: string
                     length:
                       type: integer
                       minimum: 8
+                    passwordPolicy:
+                      type: object
+                      properties:
+                        length:
+                          type: integer
+                          minimum: 8
+                        minLength:
+                          type: integer
+                          minimum: 8
+                        maxLength:
+                          type: integer
+                          minimum: 8
+                        minUpper:
+                          type: integer
+                          minimum: 0
+                        minLower:
+                          type: integer
+                          minimum: 0
+                        minDigits:
+                          type: integer
+                          minimum: 0
+                        minSpecial:
+                          type: integer
+                          minimum: 0
                     overlapSeconds:
                       type: integer
                       minimum: 0
