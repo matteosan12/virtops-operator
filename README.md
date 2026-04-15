@@ -128,8 +128,8 @@ Password policy precedence:
 
 | Field | Type | Description | Allowed values / default | Status |
 | --- | --- | --- | --- | --- |
-| `spec.publish.mode` | string | Whether and when to publish rotated credentials to a Kubernetes Secret. | `Always` \| `TestingOnly` \| `Never` | Roadmap |
-| `spec.publish.secretName` | string | Target Secret name to create/update when publishing. | string | Roadmap |
+| `spec.publish.mode` | string | Whether and when to publish rotated credentials to a Kubernetes Secret. | `Always` \| `Never` | Implemented |
+| `spec.publish.secretName` | string | Target Secret name to create/update when publishing. | string (default: `<policy-name>-publish`) | Implemented |
 
 ### Safety (`spec.safety`)
 
@@ -213,6 +213,22 @@ kubectl get jobs -n virt-ops -l guestops.io/policy=<policy-name>
 
 The executor prints a final JSON line to stdout. You can read the logs from the Job pod.
 
+If `spec.publish.mode: Always` is enabled, the operator will also publish the rotated credentials to a Kubernetes Secret in the policy namespace.
+
+Default publish Secret name:
+
+- `<policy-name>-publish` (when `spec.publish.secretName` is omitted)
+
+Published Secret data format (per-VM keys):
+
+- `VMNAME.username`
+- `VMNAME.password` (for `linux-password` and `windows-password`)
+- `VMNAME.privateKey` and `VMNAME.publicKey` (for `ssh-key`)
+
+Bootstrap behavior:
+
+- On subsequent runs, if the publish Secret contains the required keys for a VM, the operator will use that Secret as bootstrap credentials instead of `spec.method.auth.bootstrapSecretRef`.
+
 - Linux SSH executor outputs:
   - `newPublicKey`
   - `newPrivateKeyB64` (only when `source: generate`)
@@ -235,6 +251,8 @@ kubectl logs -n virt-ops job/<job-name> -c executor | tail -n 1 | jq -r '.newPri
 
 Security note: base64 output is still sensitive. Treat logs as secrets.
 
+RBAC note: publishing requires the operator ServiceAccount to be able to read pod logs (`get` on `pods/log`) in target namespaces.
+
 Secondary networks (Multus) are configured via `spec.targets.networkAttachments` / `spec.targets.networkSelection` (see the spec reference table above).
 
 ## Roadmap / Enhancements
@@ -242,6 +260,5 @@ Secondary networks (Multus) are configured via `spec.targets.networkAttachments`
 The CRD includes additional fields that are not fully implemented yet. Planned enhancements include:
 
 - `spec.rotation.overlapSeconds` for SSH key rotation (coexistence window + cleanup/final replace).
-- `spec.publish` to publish rotated credentials to a Kubernetes Secret (opt-in, safe defaults).
 - `spec.safety` retry/backoff/circuit-breaker behaviors.
 - SSH troubleshooting verbosity flag.
