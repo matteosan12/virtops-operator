@@ -14,6 +14,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -47,6 +48,8 @@ type AdminCredentialRotationPolicyReconciler struct {
 //+kubebuilder:rbac:groups=guestops.io,resources=admincredentialrotationpolicies/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=events;pods;secrets,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=external-secrets.io,resources=externalsecrets,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=external-secrets.io,resources=secretstores;clustersecretstores,verbs=get;list;watch
 
 // Reconcile is called when the desired/actual state of the watched resources changes.
 // MVP: it validates the resource existence and coordinates a rotation run when due.
@@ -76,10 +79,55 @@ func (r *AdminCredentialRotationPolicyReconciler) Reconcile(ctx context.Context,
 		}
 	}
 
-	// Determine whether the cron schedule is due
+	// Vault-driven mode: when source=external + vault config, the controller manages
+	// the ExternalSecret and triggers rotation on data-hash changes (no cron).
+	vaultDriven := policy.Spec.Rotation.Source == "external" && policy.Spec.Rotation.Vault != nil
+	dataHashChanged := false
+	currentDataHash := ""
+	if vaultDriven {
+		// Ensure the ExternalSecret exists
+		if err := r.ensureExternalSecret(ctx, &policy); err != nil {
+			logger.Error(err, "failed to ensure ExternalSecret")
+			setCondition(&policy, "ExternalSecretReady", metav1.ConditionFalse, "CreateFailed", fmt.Sprintf("failed to create ExternalSecret: %v", err))
+			_ = r.Status().Update(ctx, &policy)
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+
+		// Derive externalSecretRef from the vault config target name
+		policy.Spec.Rotation.ExternalSecretRef = externalSecretTargetName(&policy)
+
+		// Check the synced Secret for data-hash annotation
+		targetName := externalSecretTargetName(&policy)
+		var syncedSecret corev1.Secret
+		if err := r.Get(ctx, client.ObjectKey{Namespace: policy.Namespace, Name: targetName}, &syncedSecret); err != nil {
+			if errors.IsNotFound(err) {
+				logger.Info("waiting for ESO to sync Secret", "secret", targetName, "namespace", policy.Namespace)
+				setCondition(&policy, "ExternalSecretReady", metav1.ConditionFalse, "SecretNotSynced", fmt.Sprintf("waiting for ESO to sync Secret %s/%s", policy.Namespace, targetName))
+				_ = r.Status().Update(ctx, &policy)
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			}
+			return ctrl.Result{}, err
+		}
+		currentDataHash = syncedSecret.Annotations["reconcile.external-secrets.io/data-hash"]
+		if currentDataHash == "" {
+			logger.Info("synced Secret exists but data-hash annotation not yet present", "secret", targetName)
+			setCondition(&policy, "ExternalSecretReady", metav1.ConditionFalse, "HashNotReady", "synced Secret missing data-hash annotation")
+			_ = r.Status().Update(ctx, &policy)
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+		setCondition(&policy, "ExternalSecretReady", metav1.ConditionTrue, "SecretReady", fmt.Sprintf("external Secret %s/%s is ready", policy.Namespace, targetName))
+
+		// Detect data-hash change
+		if policy.Status.LastDataHash != currentDataHash {
+			logger.Info("data-hash changed, triggering rotation", "oldHash", policy.Status.LastDataHash, "newHash", currentDataHash)
+			dataHashChanged = true
+		}
+	}
+
+	// Determine whether the cron schedule is due (skipped in vault-driven mode)
 	cronDue := false
 	nextRun := time.Time{}
-	if policy.Spec.Schedule != "" {
+	if !vaultDriven && policy.Spec.Schedule != "" {
 		var last *time.Time
 		if policy.Status.LastRunTime != nil {
 			lr := policy.Status.LastRunTime.Time
@@ -106,7 +154,7 @@ func (r *AdminCredentialRotationPolicyReconciler) Reconcile(ctx context.Context,
 		return ctrl.Result{}, collectErr
 	}
 
-	if !rotateNow && !cronDue {
+	if !rotateNow && !cronDue && !dataHashChanged {
 		if inFlight, err := r.hasInFlightJobs(ctx, &policy); err != nil {
 			logger.Error(err, "error checking in-flight jobs")
 		} else if inFlight {
@@ -117,10 +165,47 @@ func (r *AdminCredentialRotationPolicyReconciler) Reconcile(ctx context.Context,
 			policy.Status.NextRunTime = &metav1.Time{Time: nextRun}
 			_ = r.Status().Update(ctx, &policy)
 		}
+		// In vault-driven mode, poll the synced Secret periodically for data-hash changes.
+		// The Secret is owned by the ExternalSecret, not the ACRP, so Owns() won't trigger events.
+		if vaultDriven {
+			return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+		}
 		return ctrl.Result{}, nil
 	}
 
 	logger.Info("starting rotation run", "policy", policy.Name, "namespace", policy.Namespace, "rotateNow", rotateNow, "cronDue", cronDue)
+
+	// If source=external, verify the external Secret (synced by ESO) exists before proceeding.
+	var externalSecret *corev1.Secret
+	if policy.Spec.Rotation.Source == "external" {
+		extRef := strings.TrimSpace(policy.Spec.Rotation.ExternalSecretRef)
+		if extRef == "" {
+			logger.Error(fmt.Errorf("externalSecretRef is required when source=external"), "cannot proceed")
+			setCondition(&policy, "ExternalSecretReady", metav1.ConditionFalse, "MissingRef", "spec.rotation.externalSecretRef is required when source=external")
+			_ = r.Status().Update(ctx, &policy)
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		var extSecret corev1.Secret
+		if err := r.Get(ctx, client.ObjectKey{Namespace: policy.Namespace, Name: extRef}, &extSecret); err != nil {
+			if errors.IsNotFound(err) {
+				logger.Info("external Secret not found, waiting for ESO sync", "secret", extRef, "namespace", policy.Namespace)
+				setCondition(&policy, "ExternalSecretReady", metav1.ConditionFalse, "SecretNotFound", fmt.Sprintf("external Secret %s/%s not found; waiting for ESO sync", policy.Namespace, extRef))
+				_ = r.Status().Update(ctx, &policy)
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+			return ctrl.Result{}, err
+		}
+		extKey := externalSecretKeyName(&policy)
+		if _, ok := extSecret.Data[extKey]; !ok {
+			logger.Info("external Secret exists but required key is missing", "secret", extRef, "key", extKey)
+			setCondition(&policy, "ExternalSecretReady", metav1.ConditionFalse, "KeyMissing", fmt.Sprintf("external Secret %s/%s is missing key %q", policy.Namespace, extRef, extKey))
+			_ = r.Status().Update(ctx, &policy)
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		externalSecret = &extSecret
+		setCondition(&policy, "ExternalSecretReady", metav1.ConditionTrue, "SecretReady", fmt.Sprintf("external Secret %s/%s is ready", policy.Namespace, extRef))
+		logger.Info("external Secret is ready", "secret", extRef, "namespace", policy.Namespace, "key", extKey)
+	}
 
 	// List target VMIs based on the policy label selector
 	var selector labels.Selector
@@ -403,6 +488,26 @@ func (r *AdminCredentialRotationPolicyReconciler) Reconcile(ctx context.Context,
 					c.Env = append(c.Env, corev1.EnvVar{Name: "BOOTSTRAP_PRIVATEKEY_FILE", Value: "/bootstrap/privateKey"})
 				}
 			}
+			// Mount external Secret (ESO/Vault) when source=external
+			if policy.Spec.Rotation.Source == "external" && externalSecret != nil {
+				extRef := strings.TrimSpace(policy.Spec.Rotation.ExternalSecretRef)
+				extKey := externalSecretKeyName(&policy)
+				job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes,
+					corev1.Volume{
+						Name: "external",
+						VolumeSource: corev1.VolumeSource{
+							Secret: &corev1.SecretVolumeSource{SecretName: extRef},
+						},
+					},
+				)
+				c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+					Name: "external", MountPath: "/external", ReadOnly: true,
+				})
+				c.Env = append(c.Env, corev1.EnvVar{
+					Name:  "EXTERNAL_CREDENTIAL_FILE",
+					Value: fmt.Sprintf("/external/%s", extKey),
+				})
+			}
 			if res.NetworksAnnotation != "" {
 				if job.Spec.Template.ObjectMeta.Annotations == nil {
 					job.Spec.Template.ObjectMeta.Annotations = map[string]string{}
@@ -438,6 +543,9 @@ func (r *AdminCredentialRotationPolicyReconciler) Reconcile(ctx context.Context,
 	// Update status
 	now := metav1.Now()
 	policy.Status.LastRunTime = &now
+	if vaultDriven {
+		policy.Status.LastDataHash = currentDataHash
+	}
 	if policy.Spec.Schedule != "" {
 		if nr, err := scheduler.NextFromCron(policy.Spec.Schedule, time.Now()); err == nil {
 			policy.Status.NextRunTime = &metav1.Time{Time: nr}
@@ -479,6 +587,7 @@ func (r *AdminCredentialRotationPolicyReconciler) SetupWithManager(mgr ctrl.Mana
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&guestopsv1alpha1.AdminCredentialRotationPolicy{}).
 		Owns(&batchv1.Job{}).
+		Owns(&corev1.Secret{}).
 		Complete(r)
 }
 
@@ -763,13 +872,20 @@ func parseLastExecutorResult(logs string) (executorResult, bool) {
 }
 
 func publishConfig(policy *guestopsv1alpha1.AdminCredentialRotationPolicy) (publish.Mode, string) {
-	if policy == nil || policy.Spec.Publish == nil {
-		return publish.ModeNever, ""
+	if policy == nil {
+		return publish.ModeAlways, ""
 	}
-	mode := publish.Mode(strings.TrimSpace(policy.Spec.Publish.Mode))
-	secretName := strings.TrimSpace(policy.Spec.Publish.SecretName)
-	if secretName == "" {
-		secretName = fmt.Sprintf("%s-publish", policy.Name)
+	mode := publish.ModeAlways
+	secretName := fmt.Sprintf("%s-publish", policy.Name)
+	if policy.Spec.Publish != nil {
+		m := publish.Mode(strings.TrimSpace(policy.Spec.Publish.Mode))
+		if m != "" {
+			mode = m
+		}
+		s := strings.TrimSpace(policy.Spec.Publish.SecretName)
+		if s != "" {
+			secretName = s
+		}
 	}
 	return mode, secretName
 }
@@ -965,3 +1081,108 @@ func jobCompletionTime(job *batchv1.Job, fallback *metav1.Time) *metav1.Time {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// externalSecretTargetName returns the name of the K8s Secret that ESO will create.
+func externalSecretTargetName(policy *guestopsv1alpha1.AdminCredentialRotationPolicy) string {
+	return fmt.Sprintf("%s-vault-secret", policy.Name)
+}
+
+// externalSecretResourceName returns the name of the ExternalSecret resource itself.
+func externalSecretResourceName(policy *guestopsv1alpha1.AdminCredentialRotationPolicy) string {
+	return fmt.Sprintf("%s-vault-es", policy.Name)
+}
+
+// ensureExternalSecret creates the ExternalSecret resource if it doesn't exist.
+// Uses unstructured to avoid importing ESO API types.
+func (r *AdminCredentialRotationPolicyReconciler) ensureExternalSecret(ctx context.Context, policy *guestopsv1alpha1.AdminCredentialRotationPolicy) error {
+	logger := log.FromContext(ctx)
+	vc := policy.Spec.Rotation.Vault
+	esName := externalSecretResourceName(policy)
+	targetName := externalSecretTargetName(policy)
+	extKey := externalSecretKeyName(policy)
+
+	esGVK := schema.GroupVersionKind{
+		Group:   "external-secrets.io",
+		Version: "v1",
+		Kind:    "ExternalSecret",
+	}
+
+	existing := &unstructured.Unstructured{}
+	existing.SetGroupVersionKind(esGVK)
+	err := r.Get(ctx, client.ObjectKey{Namespace: policy.Namespace, Name: esName}, existing)
+	if err == nil {
+		return nil
+	}
+	if !errors.IsNotFound(err) {
+		return err
+	}
+
+	logger.Info("creating ExternalSecret for vault-driven rotation", "name", esName, "namespace", policy.Namespace)
+
+	es := &unstructured.Unstructured{}
+	es.SetGroupVersionKind(esGVK)
+	es.SetName(esName)
+	es.SetNamespace(policy.Namespace)
+
+	remoteRef := map[string]interface{}{
+		"key":      vc.SecretPath,
+		"property": vc.Property,
+	}
+	if vc.Property == "" {
+		remoteRef = map[string]interface{}{
+			"key": vc.SecretPath,
+		}
+	}
+
+	es.Object["spec"] = map[string]interface{}{
+		"secretStoreRef": map[string]interface{}{
+			"name": vc.SecretStoreRef,
+			"kind": "ClusterSecretStore",
+		},
+		"target": map[string]interface{}{
+			"name":           targetName,
+			"creationPolicy": "Owner",
+		},
+		"data": []interface{}{
+			map[string]interface{}{
+				"secretKey": extKey,
+				"remoteRef": remoteRef,
+			},
+		},
+	}
+
+	if err := ctrl.SetControllerReference(policy, es, r.Scheme); err != nil {
+		return err
+	}
+
+	return r.Create(ctx, es)
+}
+
+// defaultExternalSecretKey returns the default Secret key for a given rotation kind.
+func defaultExternalSecretKey(kind string) string {
+	switch kind {
+	case "ssh-key":
+		return "privateKey"
+	default:
+		return "password"
+	}
+}
+
+// externalSecretKeyName returns the effective key name, honoring externalSecretKey if set.
+func externalSecretKeyName(policy *guestopsv1alpha1.AdminCredentialRotationPolicy) string {
+	key := strings.TrimSpace(policy.Spec.Rotation.ExternalSecretKey)
+	if key != "" {
+		return key
+	}
+	return defaultExternalSecretKey(policy.Spec.Rotation.Kind)
+}
+
+// setCondition sets or updates a status Condition on the policy.
+func setCondition(policy *guestopsv1alpha1.AdminCredentialRotationPolicy, condType string, status metav1.ConditionStatus, reason, message string) {
+	meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
+		Type:    condType,
+		Status:  status,
+		Reason:  reason,
+		Message: message,
+	})
+}

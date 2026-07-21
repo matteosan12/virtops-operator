@@ -1,0 +1,27 @@
+apiVersion: guestops.io/v1alpha1
+kind: AdminCredentialRotationPolicy
+metadata:
+  name: linux-ssh-vault
+  namespace: test-vms
+spec:
+  targets:
+    selector:
+      matchLabels:
+        role: linux-admin
+  os: linux
+  method:
+    type: ssh
+    user: root
+    port: 22
+    auth:
+      bootstrapSecretRef: bootstrap-ssh
+  rotation:
+    kind: ssh-key
+    source: external
+    vault:
+      secretStoreRef: vault-backend
+      secretPath: ssh/admin
+      property: private_key
+    authorizedKeysMode: replace
+  trigger:
+    enableAnnotation: true

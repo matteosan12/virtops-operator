@@ -105,8 +105,10 @@ spec:
 | Field | Type | Description | Allowed values / default | Status |
 | --- | --- | --- | --- | --- |
 | `spec.rotation.kind` | string | What is rotated. | `ssh-key` \| `windows-password` \| `linux-password` | Implemented |
-| `spec.rotation.source` | string | Where the new credential comes from. | `generate` \| `external` (roadmap). | Implemented (`generate` only) |
-| `spec.rotation.externalSecretRef` | string | External Secret reference used when `source=external`. | Free-form string | Roadmap |
+| `spec.rotation.source` | string | Where the new credential comes from. | `generate` \| `external` | Implemented |
+| `spec.rotation.externalSecretRef` | string | External Secret reference used when `source=external` (manual mode). | Free-form string | Implemented |
+| `spec.rotation.externalSecretKey` | string | Key within the external Secret that holds the credential. Defaults to `privateKey` for `ssh-key`, `password` for password kinds. | Free-form string | Implemented |
+| `spec.rotation.vault` | object | Vault-driven mode: auto-creates ExternalSecret and triggers rotation on data-hash changes. See [Vault-driven mode](#vault-driven-mode). | Object with `secretStoreRef`, `secretPath`, `property` | Implemented |
 | `spec.rotation.authorizedKeysMode` | string | SSH authorized_keys update strategy. | `replace` (default) \| `append` | Implemented (SSH only) |
 | `spec.rotation.length` | int | Length of generated password (legacy). | Used only when `spec.rotation.passwordPolicy` is not set. Default: executor uses `24`. | Implemented (WinRM + SSH linux-password) |
 | `spec.rotation.passwordPolicy` | object | Password generation policy. | See fields below. | Implemented (WinRM + SSH linux-password) |
@@ -128,7 +130,7 @@ Password policy precedence:
 
 | Field | Type | Description | Allowed values / default | Status |
 | --- | --- | --- | --- | --- |
-| `spec.publish.mode` | string | Whether and when to publish rotated credentials to a Kubernetes Secret. | `Always` \| `Never` | Implemented |
+| `spec.publish.mode` | string | Whether and when to publish rotated credentials to a Kubernetes Secret. Defaults to `Always` when unset. | `Always` (default) \| `Never` | Implemented |
 | `spec.publish.secretName` | string | Target Secret name to create/update when publishing. | string (default: `<policy-name>-publish`) | Implemented |
 
 ### Safety (`spec.safety`)
@@ -213,7 +215,7 @@ kubectl get jobs -n virt-ops -l guestops.io/policy=<policy-name>
 
 The executor prints a final JSON line to stdout. You can read the logs from the Job pod.
 
-If `spec.publish.mode: Always` is enabled, the operator will also publish the rotated credentials to a Kubernetes Secret in the policy namespace.
+If `spec.publish.mode: Always` (default), the operator will also publish the rotated credentials to a Kubernetes Secret in the policy namespace. This is essential for continuous rotation: subsequent runs use the publish Secret as bootstrap credentials instead of the original `bootstrapSecretRef`.
 
 Default publish Secret name:
 
@@ -254,6 +256,77 @@ Security note: base64 output is still sensitive. Treat logs as secrets.
 RBAC note: publishing requires the operator ServiceAccount to be able to read pod logs (`get` on `pods/log`) in target namespaces.
 
 Secondary networks (Multus) are configured via `spec.targets.networkAttachments` / `spec.targets.networkSelection` (see the spec reference table above).
+
+## Vault-driven mode (automatic ESO integration)
+
+When `spec.rotation.source: external` and `spec.rotation.vault` is configured, the controller fully automates the ESO integration:
+
+1. **Creates an ExternalSecret** in the policy namespace, referencing a `ClusterSecretStore` (created manually in the operator namespace for security).
+2. **Polls the synced Secret** every 15 seconds for the `reconcile.external-secrets.io/data-hash` annotation.
+3. **Triggers rotation automatically** when the data-hash changes (i.e. Vault updated the credential and ESO synced it).
+4. **Cron schedule is ignored** — rotation is driven entirely by Vault changes.
+
+This means: update the credential in Vault → ESO syncs → controller detects data-hash change → rotation runs automatically. No cron, no manual annotation needed.
+
+### Prerequisites
+
+- External Secrets Operator installed in the cluster
+- A `ClusterSecretStore` created manually (contains the Vault token, protected by RBAC)
+
+### Vault config fields
+
+| Field | Description |
+|-------|-------------|
+| `vault.secretStoreRef` | Name of the `ClusterSecretStore` to reference |
+| `vault.secretPath` | Path in Vault (e.g. `ssh/admin`) |
+| `vault.property` | Field name in the Vault secret (e.g. `private_key`). Optional. |
+
+### Example: vault-driven SSH key rotation
+
+Create a `ClusterSecretStore` manually (one-time):
+
+```yaml
+apiVersion: external-secrets.io/v1
+kind: ClusterSecretStore
+metadata:
+  name: vault-backend
+spec:
+  provider:
+    vault:
+      server: "http://vault.vault.svc:8200"
+      path: "secret"
+      version: "v2"
+      auth:
+        tokenSecretRef:
+          name: vault-token
+          namespace: virt-ops
+          key: token
+```
+
+Then create the ACRP — no schedule, no externalSecretRef:
+
+```bash
+kubectl apply -f examples/linux-ssh-vault.yaml
+```
+
+When the credential in Vault is updated, the rotation runs automatically within ~15 seconds.
+
+### Manual external mode
+
+When `spec.rotation.source: external` and `spec.rotation.vault` is **not** set, the controller expects the Secret to exist already (created manually or by a separate ExternalSecret). The Secret name is specified in `spec.rotation.externalSecretRef`. Cron schedule and manual annotation work as usual.
+
+Examples:
+
+```bash
+# Linux SSH key (external Secret)
+kubectl apply -f examples/linux-ssh-external.yaml
+
+# Linux password (external Secret)
+kubectl apply -f examples/linux-password-external.yaml
+
+# Windows password (external Secret)
+kubectl apply -f examples/windows-password-external.yaml
+```
 
 ## Roadmap / Enhancements
 

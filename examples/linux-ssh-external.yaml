@@ -1,0 +1,25 @@
+apiVersion: guestops.io/v1alpha1
+kind: AdminCredentialRotationPolicy
+metadata:
+  name: linux-ssh-external
+  namespace: test-vms 
+spec:
+  targets:
+    selector:
+      matchLabels:
+        rotation: linux-external-ssh
+  os: linux
+  method:
+    type: ssh
+    user: centos 
+    port: 22
+    auth:
+      bootstrapSecretRef: bootstrap-pass
+  rotation:
+    kind: ssh-key 
+    source: external
+    externalSecretRef: vault-ssh-key-secret
+    authorizedKeysMode: replace
+  schedule: "0 */12 * * *"
+  trigger:
+    enableAnnotation: true

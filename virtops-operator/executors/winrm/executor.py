@@ -104,7 +104,7 @@ def main() -> None:
 
     if rotation_kind != "windows-password":
         _die("unsupported ROTATION_KIND")
-    if rotation_source not in ("generate",):
+    if rotation_source not in ("generate", "external"):
         _die("unsupported ROTATION_SOURCE")
 
     boot_user = _read_opt_file(bootstrap_username_file) or target_user
@@ -113,59 +113,67 @@ def main() -> None:
     if not boot_pass:
         _die("bootstrap password file is missing or unreadable")
 
-    length_env = os.environ.get("PASSWORD_LENGTH", "")
+    external_credential_file = os.environ.get("EXTERNAL_CREDENTIAL_FILE", "")
 
-    pp_len = _read_opt_int_env("PASSWORD_POLICY_LENGTH")
-    pp_min_len = _read_opt_int_env("PASSWORD_POLICY_MIN_LENGTH")
-    pp_max_len = _read_opt_int_env("PASSWORD_POLICY_MAX_LENGTH")
-    pp_min_upper = _read_opt_int_env("PASSWORD_POLICY_MIN_UPPER")
-    pp_min_lower = _read_opt_int_env("PASSWORD_POLICY_MIN_LOWER")
-    pp_min_digits = _read_opt_int_env("PASSWORD_POLICY_MIN_DIGITS")
-    pp_min_special = _read_opt_int_env("PASSWORD_POLICY_MIN_SPECIAL")
+    if rotation_source == "external":
+        if not external_credential_file or not os.path.isfile(external_credential_file):
+            _die("EXTERNAL_CREDENTIAL_FILE is missing or unreadable")
+        with open(external_credential_file, "r", encoding="utf-8") as f:
+            new_password = f.read().strip("\n")
+    else:
+        length_env = os.environ.get("PASSWORD_LENGTH", "")
 
-    policy_present = any(
-        x is not None
-        for x in (
-            pp_len,
-            pp_min_len,
-            pp_max_len,
-            pp_min_upper,
-            pp_min_lower,
-            pp_min_digits,
-            pp_min_special,
+        pp_len = _read_opt_int_env("PASSWORD_POLICY_LENGTH")
+        pp_min_len = _read_opt_int_env("PASSWORD_POLICY_MIN_LENGTH")
+        pp_max_len = _read_opt_int_env("PASSWORD_POLICY_MAX_LENGTH")
+        pp_min_upper = _read_opt_int_env("PASSWORD_POLICY_MIN_UPPER")
+        pp_min_lower = _read_opt_int_env("PASSWORD_POLICY_MIN_LOWER")
+        pp_min_digits = _read_opt_int_env("PASSWORD_POLICY_MIN_DIGITS")
+        pp_min_special = _read_opt_int_env("PASSWORD_POLICY_MIN_SPECIAL")
+
+        policy_present = any(
+            x is not None
+            for x in (
+                pp_len,
+                pp_min_len,
+                pp_max_len,
+                pp_min_upper,
+                pp_min_lower,
+                pp_min_digits,
+                pp_min_special,
+            )
         )
-    )
 
-    pw_len = 24
-    if policy_present:
-        if pp_len is not None:
-            pw_len = pp_len
-        else:
-            if pp_min_len is None and pp_max_len is None:
-                pw_len = 24
+        pw_len = 24
+        if policy_present:
+            if pp_len is not None:
+                pw_len = pp_len
             else:
-                if pp_min_len is None:
-                    pp_min_len = pp_max_len
-                if pp_max_len is None:
-                    pp_max_len = pp_min_len
-                if pp_min_len is None or pp_max_len is None:
-                    _die("invalid password policy length range")
-                if pp_min_len > pp_max_len:
-                    _die("password policy minLength cannot be greater than maxLength")
-                pw_len = pp_min_len + secrets.randbelow(pp_max_len - pp_min_len + 1)
-    elif length_env:
-        try:
-            pw_len = int(length_env)
-        except ValueError:
-            _die("invalid PASSWORD_LENGTH")
+                if pp_min_len is None and pp_max_len is None:
+                    pw_len = 24
+                else:
+                    if pp_min_len is None:
+                        pp_min_len = pp_max_len
+                    if pp_max_len is None:
+                        pp_max_len = pp_min_len
+                    if pp_min_len is None or pp_max_len is None:
+                        _die("invalid password policy length range")
+                    if pp_min_len > pp_max_len:
+                        _die("password policy minLength cannot be greater than maxLength")
+                    pw_len = pp_min_len + secrets.randbelow(pp_max_len - pp_min_len + 1)
+        elif length_env:
+            try:
+                pw_len = int(length_env)
+            except ValueError:
+                _die("invalid PASSWORD_LENGTH")
 
-    new_password = _generate_password(
-        pw_len,
-        pp_min_upper or 0,
-        pp_min_lower or 0,
-        pp_min_digits or 0,
-        pp_min_special or 0,
-    )
+        new_password = _generate_password(
+            pw_len,
+            pp_min_upper or 0,
+            pp_min_lower or 0,
+            pp_min_digits or 0,
+            pp_min_special or 0,
+        )
 
     # WinRM endpoint
     scheme = "https" if tls else "http"

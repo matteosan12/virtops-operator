@@ -22,6 +22,7 @@ set -euo pipefail
 : "${PASSWORD_POLICY_MIN_LOWER:=}"
 : "${PASSWORD_POLICY_MIN_DIGITS:=}"
 : "${PASSWORD_POLICY_MIN_SPECIAL:=}"
+: "${EXTERNAL_CREDENTIAL_FILE:=}"
 
 mkdir -p "$WORK_DIR" || true
 export HOME="$WORK_DIR"
@@ -163,45 +164,74 @@ if [[ "$ROTATION_KIND" == "ssh-key" ]]; then
     ssh-keygen -q -t ed25519 -N "" -f "$KEY_PATH" >/dev/null
     NEW_PRIV="$(cat "$KEY_PATH")"
     NEW_PUB="$(cat "$KEY_PATH.pub")"
+  elif [[ "$ROTATION_SOURCE" == "external" ]]; then
+    # Read private key from external Secret (ESO/Vault)
+    if [[ -z "$EXTERNAL_CREDENTIAL_FILE" || ! -r "$EXTERNAL_CREDENTIAL_FILE" ]]; then
+      echo '{"status":"error","message":"EXTERNAL_CREDENTIAL_FILE is missing or unreadable"}'
+      exit 1
+    fi
+    # Read the key and normalize: ensure proper newlines and trailing newline
+    NEW_PRIV="$(cat "$EXTERNAL_CREDENTIAL_FILE")"
+    # Ensure trailing newline
+    NEW_PRIV="${NEW_PRIV}"$'\n'
+    # Write to work file with correct permissions
+    printf '%s' "$NEW_PRIV" > "$WORK_DIR/external_key"
+    chmod 600 "$WORK_DIR/external_key"
+    # Derive public key from the private key
+    if ! NEW_PUB="$(ssh-keygen -y -f "$WORK_DIR/external_key" 2>&1)"; then
+      SSH_ERR="$NEW_PUB"
+      echo "{\"status\":\"error\",\"message\":\"failed to derive public key from external private key: ${SSH_ERR}\"}"
+      exit 1
+    fi
   else
     echo '{"status":"error","message":"unsupported ROTATION_SOURCE"}'
     exit 1
   fi
 elif [[ "$ROTATION_KIND" == "linux-password" ]]; then
-  if [[ "$ROTATION_SOURCE" != "generate" ]]; then
+  if [[ "$ROTATION_SOURCE" == "generate" ]]; then
+    :
+  elif [[ "$ROTATION_SOURCE" == "external" ]]; then
+    if [[ -z "$EXTERNAL_CREDENTIAL_FILE" || ! -r "$EXTERNAL_CREDENTIAL_FILE" ]]; then
+      echo '{"status":"error","message":"EXTERNAL_CREDENTIAL_FILE is missing or unreadable"}'
+      exit 1
+    fi
+    NEW_PASS="$(cat "$EXTERNAL_CREDENTIAL_FILE")"
+  else
     echo '{"status":"error","message":"unsupported ROTATION_SOURCE"}'
     exit 1
   fi
 
-  PP_LEN="$(read_opt_int_env PASSWORD_POLICY_LENGTH)"
-  PP_MIN_LEN="$(read_opt_int_env PASSWORD_POLICY_MIN_LENGTH)"
-  PP_MAX_LEN="$(read_opt_int_env PASSWORD_POLICY_MAX_LENGTH)"
-  PP_MIN_UPPER="$(read_opt_int_env PASSWORD_POLICY_MIN_UPPER)"
-  PP_MIN_LOWER="$(read_opt_int_env PASSWORD_POLICY_MIN_LOWER)"
-  PP_MIN_DIGITS="$(read_opt_int_env PASSWORD_POLICY_MIN_DIGITS)"
-  PP_MIN_SPECIAL="$(read_opt_int_env PASSWORD_POLICY_MIN_SPECIAL)"
+  if [[ "$ROTATION_SOURCE" == "generate" ]]; then
+    PP_LEN="$(read_opt_int_env PASSWORD_POLICY_LENGTH)"
+    PP_MIN_LEN="$(read_opt_int_env PASSWORD_POLICY_MIN_LENGTH)"
+    PP_MAX_LEN="$(read_opt_int_env PASSWORD_POLICY_MAX_LENGTH)"
+    PP_MIN_UPPER="$(read_opt_int_env PASSWORD_POLICY_MIN_UPPER)"
+    PP_MIN_LOWER="$(read_opt_int_env PASSWORD_POLICY_MIN_LOWER)"
+    PP_MIN_DIGITS="$(read_opt_int_env PASSWORD_POLICY_MIN_DIGITS)"
+    PP_MIN_SPECIAL="$(read_opt_int_env PASSWORD_POLICY_MIN_SPECIAL)"
 
-  PW_LEN=24
-  if [[ -n "$PP_LEN" ]]; then
-    PW_LEN="$PP_LEN"
-  else
-    if [[ -n "$PP_MIN_LEN" || -n "$PP_MAX_LEN" ]]; then
-      if [[ -z "$PP_MIN_LEN" ]]; then PP_MIN_LEN="$PP_MAX_LEN"; fi
-      if [[ -z "$PP_MAX_LEN" ]]; then PP_MAX_LEN="$PP_MIN_LEN"; fi
-      if (( PP_MIN_LEN > PP_MAX_LEN )); then
-        echo '{"status":"error","message":"password policy minLength cannot be greater than maxLength"}'
-        exit 1
-      fi
-      PW_LEN="$(rand_range "$PP_MIN_LEN" "$PP_MAX_LEN")"
-    elif [[ -n "$PASSWORD_LENGTH" ]]; then
-      LEGACY_LEN="$(read_opt_int_env PASSWORD_LENGTH)"
-      if [[ -n "$LEGACY_LEN" ]]; then
-        PW_LEN="$LEGACY_LEN"
+    PW_LEN=24
+    if [[ -n "$PP_LEN" ]]; then
+      PW_LEN="$PP_LEN"
+    else
+      if [[ -n "$PP_MIN_LEN" || -n "$PP_MAX_LEN" ]]; then
+        if [[ -z "$PP_MIN_LEN" ]]; then PP_MIN_LEN="$PP_MAX_LEN"; fi
+        if [[ -z "$PP_MAX_LEN" ]]; then PP_MAX_LEN="$PP_MIN_LEN"; fi
+        if (( PP_MIN_LEN > PP_MAX_LEN )); then
+          echo '{"status":"error","message":"password policy minLength cannot be greater than maxLength"}'
+          exit 1
+        fi
+        PW_LEN="$(rand_range "$PP_MIN_LEN" "$PP_MAX_LEN")"
+      elif [[ -n "$PASSWORD_LENGTH" ]]; then
+        LEGACY_LEN="$(read_opt_int_env PASSWORD_LENGTH)"
+        if [[ -n "$LEGACY_LEN" ]]; then
+          PW_LEN="$LEGACY_LEN"
+        fi
       fi
     fi
-  fi
 
-  NEW_PASS="$(generate_password "$PW_LEN" "${PP_MIN_UPPER:-0}" "${PP_MIN_LOWER:-0}" "${PP_MIN_DIGITS:-0}" "${PP_MIN_SPECIAL:-0}")"
+    NEW_PASS="$(generate_password "$PW_LEN" "${PP_MIN_UPPER:-0}" "${PP_MIN_LOWER:-0}" "${PP_MIN_DIGITS:-0}" "${PP_MIN_SPECIAL:-0}")"
+  fi
 else
   echo '{"status":"error","message":"unsupported ROTATION_KIND"}'
   exit 1
