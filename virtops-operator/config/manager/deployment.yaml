@@ -18,7 +18,7 @@ spec:
       serviceAccountName: virtops-operator
       containers:
         - name: manager
-          image: image-registry.openshift-image-registry.svc:5000/virt-ops/virtops-operator
+          image: YOUR_INTERNAL_REGISTRY/virtops-operator:latest
           imagePullPolicy: IfNotPresent
           command:
             - /manager
@@ -26,9 +26,9 @@ spec:
             - --leader-elect
           env:
             - name: SSH_EXECUTOR_IMAGE
-              value: "alpine:3.19"
+              value: "YOUR_INTERNAL_REGISTRY/virtops-ssh-executor:latest"
             - name: WINRM_EXECUTOR_IMAGE
-              value: "image-registry.openshift-image-registry.svc:5000/virt-ops/virtops-winrm-executor:latest"
+              value: "YOUR_INTERNAL_REGISTRY/virtops-winrm-executor:latest"
           ports:
             - containerPort: 8080
               name: metrics

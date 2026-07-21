@@ -65,8 +65,18 @@ type Rotation struct {
 	// Source of the new credential: generate (by the controller) or external (via ESO/Vault).
 	// +kubebuilder:validation:Enum=generate;external
 	Source string `json:"source"`
-	// ExternalSecretRef is a logical reference to a Secret managed by External Secrets (future).
+	// ExternalSecretRef is the name of a Secret managed by External Secrets Operator (ESO)
+	// that contains the new credential to apply. Required when source=external and vault is not set.
+	// The Secret must exist in the same namespace as the policy.
 	ExternalSecretRef string `json:"externalSecretRef,omitempty"`
+	// ExternalSecretKey is the key within the external Secret that holds the credential.
+	// Defaults to "privateKey" for ssh-key, "password" for linux-password and windows-password.
+	ExternalSecretKey string `json:"externalSecretKey,omitempty"`
+	// Vault configures automatic ExternalSecret creation. When set, the controller creates
+	// an ExternalSecret in the policy namespace referencing the given ClusterSecretStore.
+	// Rotation is triggered automatically when the synced Secret's data-hash changes.
+	// Cron schedule is ignored when vault is configured.
+	Vault *VaultConfig `json:"vault,omitempty"`
 	// Length is the generated password length (when applicable).
 	Length         *int32          `json:"length,omitempty"`
 	PasswordPolicy *PasswordPolicy `json:"passwordPolicy,omitempty"`
@@ -74,9 +84,23 @@ type Rotation struct {
 	OverlapSeconds *int32 `json:"overlapSeconds,omitempty"`
 }
 
+// VaultConfig configures automatic ExternalSecret creation for ESO/Vault integration.
+// When set, the controller creates an ExternalSecret in the policy namespace and
+// triggers rotation automatically when the synced Secret data changes.
+// The ClusterSecretStore must be created manually (it contains the Vault token).
+type VaultConfig struct {
+	// SecretStoreRef is the name of the ClusterSecretStore to reference.
+	SecretStoreRef string `json:"secretStoreRef"`
+	// SecretPath is the path in Vault (e.g. "ssh/admin").
+	SecretPath string `json:"secretPath"`
+	// Property is the field name in the Vault secret (e.g. "private_key").
+	Property string `json:"property,omitempty"`
+}
+
 type Publish struct {
-	// Mode: Always | Never
+	// Mode: Always | Never. Defaults to Always when unset.
 	// +kubebuilder:validation:Enum=Always;Never
+	// +kubebuilder:default="Always"
 	Mode string `json:"mode,omitempty"`
 	// SecretName is the Secret name to publish the rotated credential to (when allowed by Mode).
 	SecretName string `json:"secretName,omitempty"`
@@ -122,10 +146,11 @@ type RotationResult struct {
 
 // AdminCredentialRotationPolicyStatus tracks the policy status.
 type AdminCredentialRotationPolicyStatus struct {
-	Conditions  []metav1.Condition `json:"conditions,omitempty"`
-	NextRunTime *metav1.Time       `json:"nextRunTime,omitempty"`
-	LastRunTime *metav1.Time       `json:"lastRunTime,omitempty"`
-	Results     []RotationResult   `json:"results,omitempty"`
+	Conditions   []metav1.Condition `json:"conditions,omitempty"`
+	NextRunTime  *metav1.Time       `json:"nextRunTime,omitempty"`
+	LastRunTime  *metav1.Time       `json:"lastRunTime,omitempty"`
+	Results      []RotationResult   `json:"results,omitempty"`
+	LastDataHash string             `json:"lastDataHash,omitempty"`
 }
 
 // +kubebuilder:object:root=true
